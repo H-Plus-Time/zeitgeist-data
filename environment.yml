@@ -1,0 +1,7 @@
+name: zeitgeist-data
+dependencies:
+    - python=3.6
+    - pip:
+        - pubmed_parser
+        - goblin
+        - google-cloud-python
