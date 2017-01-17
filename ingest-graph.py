@@ -38,7 +38,30 @@ def extract_graph(path):
         wrote_edges.append((id_tuple, author, i+1))
     return {"article": id_tuple, "authors": tuple(author_list), "wrote_edges": tuple(wrote_edges)}
 
+def translate_to_graphson(obj):
+    ret_obj = {"id": random.randint(), properties: {}}
+
 def deposit_article(article):
+    """
+        A few options for deposition into DSE/Titan:
+        1. few-slice spark procedures (n, where n is the number of DSE instances, should be safe), with transaction retrying.
+            Cons:
+             * May still fall foul of persistence exceptions.
+             * Need to implement transaction retrying, and single-thread fallback
+            Pros:
+             * potentially much faster
+        2. Parallel transform to GraphSON, merge in driver context, scp to DSE instance, execute bulkLoader.
+            Cons:
+             * Potentially non-automated
+            Pros:
+             * probably the fastest approach, given the amount of effort poured in by devs
+        3. Write from driver context, in serial.
+            Cons:
+             * quite slow
+            Pros:
+             * simple to implement
+    """
+
     async def inner_func(article):
         loop = asyncio.get_event_loop()
         remote_conn = await driver.Connection.open(
@@ -65,7 +88,7 @@ def deposit_wrote_edges(wrote_edge):
 # pubmed_articles = path_rdd.map(lambda p: extract_article(p)).collect()
 # print(pubmed_articles)
 pubmed_oa_all = path_rdd.map(lambda p: extract_graph(p))
-pubmed_articles = pubmed_oa_all.map(lambda p: p['article'])
+pubmed_articles = pubmed_oa_all.map(lambda p: p['article']).coalesce(3)
 article_ids = pubmed_articles.map(lambda article: deposit_article(article)).collect()
 pubmed_authors = pubmed_oa_all.map(lambda p: p['authors']).distinct()
 author_ids = pubmed_authors.map(lambda author: deposit_author(author)).collect()
