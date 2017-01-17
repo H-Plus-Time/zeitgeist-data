@@ -1,7 +1,9 @@
 name: zeitgeist-data
 dependencies:
-    - python=3.6
+    - python=3.5
+    - six
+    - pandas
     - pip:
-        - pubmed_parser
+        - git+https://github.com/titipata/pubmed_parser.git
         - goblin
-        - google-cloud-python
+        - uvloop
