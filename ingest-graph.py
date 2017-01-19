@@ -3,6 +3,7 @@ import pubmed_parser as pp
 import pprint
 from pyspark import SparkConf, SparkContext
 import asyncio
+from itertools import chain
 import uvloop
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from goblin import driver
@@ -14,7 +15,7 @@ conf = (SparkConf()
          .setAppName("My app")
          .set("spark.executor.memory", "1g"))
 sc = SparkContext(conf = conf)
-path_all = pp.list_xml_path('/media/store/pubmed')
+path_all = pp.list_xml_path('/home/nicholas/host')
 path_rdd = sc.parallelize(path_all, numSlices=100)
 
 def extract_article(path):
@@ -36,7 +37,7 @@ def extract_graph(path):
 
     wrote_edges = []
     for i, author in enumerate(author_list):
-        wrote_edges.append((id_tuple, author, i+1))
+        wrote_edges.append((author, id_tuple, i+1))
     return {"article": id_tuple, "authors": tuple(author_list), "wrote_edges": tuple(wrote_edges)}
 
 def translate_to_graphson(obj):
@@ -69,34 +70,50 @@ def deposit_article(article):
             "http://localhost:8182/gremlin", loop, message_serializer=GraphSONMessageSerializer)
         graph = driver.AsyncGraph()
         g = graph.traversal().withRemote(remote_conn)
-        art = await g.addV(T.label, 'article').next()
-        # await g.V(x['id']).property('pmid', article[0]).oneOrNone()
-        # await g.V(x['id']).property('pmc', article[1]).oneOrNone()
-        # await g.V(x['id']).property('doi', article[2]).oneOrNone()
-        return art
+        art = await g.addV(T.label, 'article', 'pmid', article[0],'pmc', article[1],'doi', article[2]).next()
+        return (article, art['id'])
     loop = asyncio.get_event_loop()
-    thing = loop.run_until_complete(inner_func(article))
-    return thing
+    return loop.run_until_complete(inner_func(article))
 
 def deposit_author(author):
-    return author
+    async def inner_func(author):
+        loop = asyncio.get_event_loop()
+        remote_conn = await driver.Connection.open(
+            "http://localhost:8182/gremlin", loop, message_serializer=GraphSONMessageSerializer)
+        graph = driver.AsyncGraph()
+        g = graph.traversal().withRemote(remote_conn)
+        auth = await g.addV(T.label, 'article', 'last_name', author[0], 'first_name', author[1], 'affiliation', author[2]).next()
+        return (tuple(author), auth['id'])
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(inner_func(author))
 
 def deposit_wrote_edges(wrote_edge):
-    return wrote_edge
+    async def inner_func(wrote_edge):
+        loop = asyncio.get_event_loop()
+        remote_conn = await driver.Connection.open(
+            "http://localhost:8182/gremlin", loop, message_serializer=GraphSONMessageSerializer)
+        graph = driver.AsyncGraph()
+        g = graph.traversal().withRemote(remote_conn)
+        wrote_edge = await g.V(wrote_edge[1][0]).addE('wrote').to(g.V(wrote_edge[1][1])).next()
+        return wrote_edge
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(inner_func(wrote_edge))
 
 
 # pubmed_articles = path_rdd.map(lambda p: extract_article(p)).collect()
 # print(pubmed_articles)
 pubmed_oa_all = path_rdd.map(lambda p: extract_graph(p))
 pubmed_articles = pubmed_oa_all.map(lambda p: p['article']).coalesce(1)
-article_ids = pubmed_articles.map(lambda article: deposit_article(article)).collect()
-pubmed_authors = pubmed_oa_all.map(lambda p: p['authors']).distinct()
-author_ids = pubmed_authors.map(lambda author: deposit_author(author)).collect()
+article_ids = pubmed_articles.map(lambda article: deposit_article(article))
+pubmed_authors = pubmed_oa_all.flatMap(lambda p: p['authors']).distinct()
+authors_mapped = pubmed_authors.map(lambda author: deposit_author(author))
 pubmed_wrote_edges = pubmed_oa_all.map(lambda p: p['wrote_edges'])
-wrote_edge_ids = pubmed_wrote_edges.map(lambda w_edge: deposit_wrote_edges(w_edge)).collect()
+auth_we_edge = pubmed_wrote_edges.flatMap(lambda w_e: w_e).join(authors_mapped)
+auth_art_we_edge = auth_we_edge.flatMap(lambda w_e: w_e[1:]).join(article_ids)
+wrote_edge_ids = auth_art_we_edge.map(lambda w_edge: deposit_wrote_edges(w_edge)).collect()
 
-print(article_ids[0])
-print(author_ids[0])
-print(wrote_edge_ids[0])
+# print(article_ids[0])
+print(wrote_edge_ids)
 # path_rdd.map(lambda p: pp.parse_pubmed_xml(p)).saveAsPickleFile('pubmed_oa.pickle') # or to save to pickle
-pprint.pprint(author_ids[0])
+# pprint.pprint(auth_art_we_edge[0])
+# pprint.pprint(article_ids.collect()[0])
