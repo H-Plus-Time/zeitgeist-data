@@ -7,13 +7,14 @@ import uvloop
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from goblin import driver
 from goblin.driver.serializer import GraphSONMessageSerializer
+from gremlin_python.process.traversal import T
 
 conf = (SparkConf()
          .setMaster("local")
          .setAppName("My app")
          .set("spark.executor.memory", "1g"))
 sc = SparkContext(conf = conf)
-path_all = pp.list_xml_path('/media/nicholas/Vault2/pb_excerpt/')
+path_all = pp.list_xml_path('/media/store/pubmed')
 path_rdd = sc.parallelize(path_all, numSlices=100)
 
 def extract_article(path):
@@ -68,14 +69,13 @@ def deposit_article(article):
             "http://localhost:8182/gremlin", loop, message_serializer=GraphSONMessageSerializer)
         graph = driver.AsyncGraph()
         g = graph.traversal().withRemote(remote_conn)
-        x = await g.addV('article').next()
+        art = await g.addV(T.label, 'article').next()
         # await g.V(x['id']).property('pmid', article[0]).oneOrNone()
         # await g.V(x['id']).property('pmc', article[1]).oneOrNone()
         # await g.V(x['id']).property('doi', article[2]).oneOrNone()
-        return x['id']
+        return art
     loop = asyncio.get_event_loop()
     thing = loop.run_until_complete(inner_func(article))
-    # loop.close()
     return thing
 
 def deposit_author(author):
@@ -88,7 +88,7 @@ def deposit_wrote_edges(wrote_edge):
 # pubmed_articles = path_rdd.map(lambda p: extract_article(p)).collect()
 # print(pubmed_articles)
 pubmed_oa_all = path_rdd.map(lambda p: extract_graph(p))
-pubmed_articles = pubmed_oa_all.map(lambda p: p['article']).coalesce(3)
+pubmed_articles = pubmed_oa_all.map(lambda p: p['article']).coalesce(1)
 article_ids = pubmed_articles.map(lambda article: deposit_article(article)).collect()
 pubmed_authors = pubmed_oa_all.map(lambda p: p['authors']).distinct()
 author_ids = pubmed_authors.map(lambda author: deposit_author(author)).collect()
