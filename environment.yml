@@ -4,6 +4,6 @@ dependencies:
     - six
     - pandas
     - pip:
-        - git+https://github.com/titipata/pubmed_parser.git
+        - git+https://github.com/H-Plus-Time/pubmed_parser.git
         - goblin
         - uvloop
