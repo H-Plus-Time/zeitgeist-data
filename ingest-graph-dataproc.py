@@ -5,6 +5,19 @@ from pyspark import SparkConf, SparkContext
 import asyncio
 from itertools import chain
 import uvloop
+import boto
+import os
+import shutil
+import json
+from io import StringIO
+import tempfile
+import time
+
+# URI scheme for Cloud Storage.
+GOOGLE_STORAGE = 'gs'
+# URI scheme for accessing local files.
+LOCAL_FILE = 'file'
+
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from goblin import driver
 from goblin.driver.serializer import GraphSONMessageSerializer
@@ -35,23 +48,65 @@ def extract_graph(k_v_pair):
     wrote_edges = []
     for i, author in enumerate(author_list):
         wrote_edges.append((author, id_tuple, i+1))
-    return {"article": id_tuple, "authors": tuple(author_list), "wrote_edges": tuple(wrote_edges)}
+
+    abstract_words = textacy.Doc(data['abstract'], lang='en').to_bag_of_terms(
+        ngrams=2, named_entities=True,lemmatize=True,as_strings=True
+    )
+    abstract_keywords = tuple(abstract_words.keys())
+    abstract_art_edges = []
+    for k,v in abstract_keywords.items():
+        abstract_art_edges.append((k, id_tuple, v))
+    return {"article": id_tuple, "authors": tuple(author_list),
+            "abstract_edges": tuple(abstract_art_edges),
+            "keywords": abstract_keywords, "wrote_edges": tuple(wrote_edges)}
 
 def translate_to_graphson(obj):
-    ret_obj = {"id": random.randint(), properties: {}}
+    properties = {}
+    for i, (k,v) in enumerate(obj.items()):
+        properties[k] = [{"id": i, "value": v}]
+    ret_obj = {"id": os.uname()[1] + str(int(time.time())),
+                "outE": [], "inE": [],
+                "properties": properties}
 
 from subprocess import call
-import os
 path_rdd = sc.sequenceFile('gs://zeitgeist-store-1234/pubmed_seq', minSplits=10)
 # pubmed_articles = path_rdd.map(lambda p: extract_article(p)).collect()
 # print(pubmed_articles)
 pubmed_oa_all = path_rdd.map(lambda p: extract_graph(p))
-pubmed_articles = pubmed_oa_all.map(lambda p: p['article']).collect()
-pubmed_authors = pubmed_oa_all.flatMap(lambda p: p['authors']).distinct().collect()
+pubmed_articles = pubmed_oa_all.map(lambda p: translate_to_graphson(p['article'])).collect()
+print(pubmed_articles[0])
+# write article graphjson
+
+pubmed_authors = (pubmed_oa_all.flatMap(lambda p: p['authors']).distinct()
+                    .map(lambda p: translate_to_graphson(p)).collect()
+)
+print(pubmed_authors[0])
+
+
+# write author graphson
 pubmed_wrote_edges = pubmed_oa_all.map(lambda p: p['wrote_edges']).collect()
-print(pubmed_articles)
-print(pubmed_authors)
-print(pubmed_wrote_edges)
+print(pubmed_wrote_edges[0])
+keyword_edges = pubmed_oa_all.map(lambda p: p['abstract_edges']).collect()
+print(keyword_edges[0])
+
+# Write all the edges!
+
+temp_dir = tempfile.mkdtemp(prefix='googlestorage')
+with open("pubmed_articles.graphson", "w") as f:
+    json.dump(pubmed_articles, f)
+
+with open("pubmed_authors.graphson", "w") as f:
+    json.dump(pubmed_authors, f)
+
+with open("pubmed_wrote_edges.json", "w") as f:
+    json.dump(pubmed_wrote_edges, f)
+
+for filename in ['pubmed_articles.graphson', 'pubmed_authors.graphson', 'pubmed_wrote_edges.json']:
+    with open(os.path.join(temp_dir, filename), 'r') as localfile:
+
+        dst_uri = boto.storage_uri(
+            "zeitgeist-store-1234" + '/' + filename, GOOGLE_STORAGE)
+        dst_uri.new_key().set_contents_from_file(localfile)
 # authors_mapped = sc.parallelize(list(map(lambda author: deposit_author(author), pubmed_authors)))
 # article_ids = sc.parallelize(list(map(lambda article: deposit_article(article), pubmed_articles)))
 # auth_we_edge = pubmed_wrote_edges.flatMap(lambda w_e: w_e).join(authors_mapped)
