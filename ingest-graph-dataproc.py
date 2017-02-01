@@ -17,7 +17,39 @@ import time
 import random
 from subprocess import call
 import spacy                         # See "Installing spaCy"
-nlp = spacy.load('en')
+class Pickleless(object):
+
+    def __init__(self, cls, *args, **kwargs):
+        object.__setattr__(self, '__init', (cls, args, kwargs))
+
+    def __o(self):
+        try:
+            o = self.__dict__['__instance']
+        except KeyError:
+            cls, args, kwargs = self.__dict__['__init']
+            o = cls(*args, **kwargs)
+            object.__setattr__(self, '__instance', o)
+        return o
+
+    def __getstate__(self):
+        return self.__dict__['__init']
+
+    def __setstate__(self, state):
+        cls, args, kwargs = state
+        Pickleless.__init__(self, cls, *args, **kwargs)
+
+    def __call__(self, *args, **kwargs):
+        return self.__o()(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.__o(), name)
+
+    def __setattr__(self, name, value):
+        setattr(self.__o(), name, value)
+
+# _English = Pickleless(spacy.en.English)
+# def nlp(text, **kwargs):
+#     return _English(_decode(text), **kwargs)
 
 # URI scheme for Cloud Storage.
 GOOGLE_STORAGE = 'gs'
@@ -30,7 +62,7 @@ from goblin.driver.serializer import GraphSONMessageSerializer
 from gremlin_python.process.traversal import T
 
 conf = (SparkConf()
-    # .set('spark.executor.memory', '5500m')
+    # .set('spark.executor.memory', '4g')
     .set('spark.executor.cores', 2))
 
 sc = SparkContext(conf = conf)
@@ -99,7 +131,7 @@ def gen_keyword_graphson(keyword_group):
     keyword_id = gen_id()
     kw_edges = list(map(lambda e: {"id": gen_id(), "inV": e[1],
         "properties": {"count": e[2]}}, keyword_group[1]
-    }))
+    ))
     return translate_to_graphson({"keyword": keyword_group[0]},
         keyword_id, {}, {"present_in": kw_edges}, "keyword")
 
