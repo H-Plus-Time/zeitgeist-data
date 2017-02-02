@@ -18,7 +18,7 @@ import time
 import random
 from subprocess import call
 import spacy                         # See "Installing spaCy"
-
+import requests
 
 # URI scheme for Cloud Storage.
 GOOGLE_STORAGE = 'gs'
@@ -68,13 +68,15 @@ def extract_graph(k_v_pair):
             "abstract_edge": (article_id, data['abstract']),"wrote_edges": tuple(wrote_edges)}
 
 def extract_keywords(abstract_iter):
+
     nlp = spacy.load('en')
     ret_keywords = []
     art_ids, abstracts = zip(*abstract_iter)
-    for art_id, doc in zip(art_ids, nlp.pipe(abstracts, batch_size=10000, n_threads=3)):
+    for art_id, doc in zip(art_ids, nlp.pipe(abstracts, batch_size=1000, n_threads=3)):
         words = [(token.text, token.tag_) for token in doc if token.is_stop != True and token.is_punct != True]
         word_freq = tuple(Counter(words).items())
-        yield tuple(map(lambda keyword: (keyword[0], art_id, keyword[1]), word_freq))
+        for keyword in word_freq:
+            yield (keyword[0], art_id, keyword[1])
 
 def translate_to_graphson(obj, id_str, inEdges={}, outEdges={}, label="vertex"):
     properties = {}
@@ -110,36 +112,37 @@ def gen_keyword_graphson(keyword_group):
     kw_edges = list(map(lambda e: {"id": gen_id(), "inV": e[1],
         "properties": {"count": e[2]}}, keyword_group[1]
     ))
-    return translate_to_graphson({"keyword": keyword_group[0]},
+    return translate_to_graphson({"keyword": keyword_group[0][0], "annotation": keyword_group[0][1]},
         keyword_id, {}, {"present_in": kw_edges}, "keyword")
 
 temp_dir = tempfile.mkdtemp(prefix='googlestorage')
 
 path_rdd = sc.sequenceFile('gs://zeitgeist-store-1234/pubmed_seq', minSplits=10)
 
-pubmed_oa_all = path_rdd.sample(False, 0.001, 81).map(lambda p: extract_graph(p))
+pubmed_oa_all = sc.parallelize(path_rdd.take(10000)).map(lambda p: extract_graph(p))
 
 # Extract authors
 
 # All information available at this point, just need to group author links
-# pubmed_wrote_edges = pubmed_oa_all.flatMap(lambda p: p['wrote_edges']).groupBy(lambda v: v[0])
-# author_nodes = pubmed_wrote_edges.map(gen_author_graphson)
-# with jsonlines.open(os.path.join(temp_dir, "pubmed_authors.graphson"), "w") as writer:
-#     writer.write_all(author_nodes.collect())
-# Extract keywords
-# pubmed_keywords = pubmed_oa_all.flatMap(lambda p: p['keywords']).distinct().keyBy(lambda v: v)
-
-# keyword_edges = pubmed_oa_all.map(lambda p: p['abstract_edges']).groupBy(lambda v: v[0])
-# keyword_nodes = keyword_edges.map(gen_keyword_graphson)
+pubmed_wrote_edges = pubmed_oa_all.flatMap(lambda p: p['wrote_edges']).groupBy(lambda v: v[0])
+author_nodes = pubmed_wrote_edges.map(gen_author_graphson)
+with jsonlines.open(os.path.join(temp_dir, "pubmed_authors.graphson"), "w") as writer:
+    writer.write_all(author_nodes.collect())
+# abstract_bulk = pubmed_oa_all.map(lambda p: p['abstract_edge']).collect()
+# extracts = []
+# for i in range(0, len(abstract_bulk), 10000):
+#     print("{}th of {} abstracts".format(i, len(abstract_bulk)))
+#     extracts += list(extract_keywords(abstract_bulk[i:i+10000]))
+# # extracts = list(extract_keywords(keyword_bulk))
+# keywords = sc.parallelize(extracts)
+#
+# keyword_nodes = keywords.groupBy(lambda v: v[0]).map(gen_keyword_graphson)
+#
 # with jsonlines.open(os.path.join(temp_dir, "pubmed_keywords.graphson"), "w") as writer:
 #     writer.write_all(keyword_nodes.collect())
 
-keywords = sc.parallelize(extract_keywords(pubmed_oa_all.map(lambda p: p['abstract_edge']).collect()))
-
-keyword_nodes = keywords.map(gen_keyword_graphson)
-
-with jsonlines.open(os.path.join(temp_dir, "pubmed_keywords.graphson"), "w") as writer:
-    writer.write_all(keyword_nodes.collect())
+with open(os.path.join(temp_dir,"wrote_edges.json"), "w") as f:
+    json.dump(pubmed_oa_all.flatMap(lambda p: p['wrote_edges']).collect(), f)
 
 # Extract articles
 article_nodes = pubmed_oa_all.map(lambda p: p['article']).map(gen_art_graphson)
@@ -148,16 +151,5 @@ with jsonlines.open(os.path.join(temp_dir, "pubmed_articles.graphson"), "w") as 
 
 
 
-paths = ['pubmed_articles.graphson', 'pubmed_authors.graphson', 'pubmed_keywords.graphson']
+paths = ['pubmed_articles.graphson', 'pubmed_authors.graphson', 'pubmed_keywords.graphson', 'wrote_edges.json']
 call(["gsutil", "-m", "cp", temp_dir + "/*son", "gs://zeitgeist-store-1234"])
-# authors_mapped = sc.parallelize(list(map(lambda author: deposit_author(author), pubmed_authors)))
-# article_ids = sc.parallelize(list(map(lambda article: deposit_article(article), pubmed_articles)))
-# auth_we_edge = pubmed_wrote_edges.flatMap(lambda w_e: w_e).join(authors_mapped)
-# auth_art_we_edge = auth_we_edge.flatMap(lambda w_e: w_e[1:]).join(article_ids).collect()
-# wrote_edge_ids = list(map(lambda w_edge: deposit_wrote_edges(w_edge), auth_art_we_edge))
-
-# print(article_ids[0])
-# print(wrote_edge_ids)
-# path_rdd.map(lambda p: pp.parse_pubmed_xml(p)).saveAsPickleFile('pubmed_oa.pickle') # or to save to pickle
-# pprint.pprint(auth_art_we_edge[0])
-# pprint.pprint(article_ids.collect()[0])
